@@ -8,7 +8,12 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:audio_service/audio_service.dart';
+import 'playback_service.dart';
 part 'track_import_dialog.dart';
+part 'equalizer_panel.dart';
+
+MusicPlaybackService? playbackService;
 
 const lime = Color(0xffd9fb52), muted = Color(0xff999584);
 
@@ -18,9 +23,21 @@ class LocalTrack {
   final String name;
 }
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   JustAudioMediaKit.ensureInitialized(linux: true, windows: true);
+  if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
+    playbackService = await AudioService.init(
+      builder: MusicPlaybackService.new,
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'com.aiyue.music.playback',
+        androidNotificationChannelName: '爱悦音乐播放',
+        androidNotificationOngoing: true,
+        androidStopForegroundOnPause: true,
+      ),
+    );
+    await playbackService!.configureSession();
+  }
   runApp(const MusicApp());
 }
 
@@ -50,7 +67,7 @@ class PlayerPage extends StatefulWidget {
 }
 
 class _PlayerPageState extends State<PlayerPage> {
-  final player = AudioPlayer();
+  late final player = playbackService?.player ?? AudioPlayer();
   final search = TextEditingController();
   final subs = <StreamSubscription<dynamic>>[];
   static const folders = MethodChannel('aiyue/folders');
@@ -69,6 +86,8 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void initState() {
     super.initState();
+    playbackService?.next = () async => next();
+    playbackService?.previous = () async => next(previous: true);
     subs.add(
       player.positionStream.listen((v) {
         if (mounted) setState(() => position = v);
@@ -249,6 +268,16 @@ class _PlayerPageState extends State<PlayerPage> {
       position = Duration.zero;
       duration = Duration.zero;
     });
+    playbackService?.mediaItem.add(
+      MediaItem(
+        id: tracks[index].path,
+        title: tracks[index].name,
+        album:
+            androidFolderName ??
+            (folder == null ? '本地音乐' : p.basename(folder!)),
+        artist: '爱悦 · 本地音乐',
+      ),
+    );
     try {
       final path = tracks[index].path;
       if (path.startsWith('content://')) {
@@ -257,6 +286,7 @@ class _PlayerPageState extends State<PlayerPage> {
         await player.setFilePath(path);
       }
       if (!mounted || request != token) return;
+      await playbackService?.restoreEqualizer();
       await player.setSpeed(speed);
       startPlayback();
     } catch (e) {
@@ -496,6 +526,14 @@ class _PlayerPageState extends State<PlayerPage> {
                     ],
                   ),
                   const SizedBox(height: 22),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: TextButton.icon(
+                      onPressed: openEqualizer,
+                      icon: const Icon(Icons.tune, size: 19),
+                      label: const Text('均衡器'),
+                    ),
+                  ),
                   Row(
                     children: [
                       tool(Icons.speed, '倍速', speeds),
@@ -907,7 +945,9 @@ class _PlayerPageState extends State<PlayerPage> {
     for (final s in subs) {
       s.cancel();
     }
-    player.dispose();
+    if (playbackService == null) player.dispose();
+    playbackService?.next = null;
+    playbackService?.previous = null;
     search.dispose();
     super.dispose();
   }

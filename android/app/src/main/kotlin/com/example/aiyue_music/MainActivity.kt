@@ -1,6 +1,6 @@
 package com.example.aiyue_music
 
-import io.flutter.embedding.android.FlutterActivity
+import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import android.app.Activity
@@ -9,7 +9,7 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import java.util.concurrent.Executors
 
-class MainActivity : FlutterActivity() {
+class MainActivity : AudioServiceActivity() {
     private var pending: MethodChannel.Result? = null
     private val worker = Executors.newSingleThreadExecutor()
 
