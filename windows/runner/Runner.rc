@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "aiyue_music" "\0"
+            VALUE "FileDescription", "爱悦" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "aiyue_music" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
             VALUE "OriginalFilename", "aiyue_music.exe" "\0"
-            VALUE "ProductName", "aiyue_music" "\0"
+            VALUE "ProductName", "爱悦" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
