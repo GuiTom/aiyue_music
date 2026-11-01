@@ -21,9 +21,10 @@ MusicPlaybackService? playbackService;
 const lime = Color(0xffd9fb52), muted = Color(0xff999584);
 
 class LocalTrack {
-  const LocalTrack(this.path, this.name);
+  const LocalTrack(this.path, this.name, {this.source});
   final String path;
   final String name;
+  final String? source;
 }
 
 Future<void> main() async {
@@ -76,16 +77,18 @@ class _PlayerPageState extends State<PlayerPage> {
   final subs = <StreamSubscription<dynamic>>[];
   static const folders = MethodChannel('aiyue/folders');
   List<LocalTrack> tracks = [];
+  List<LocalTrack> library = [];
   Set<String> favorites = {};
-  final List<LocalTrack> downloadedTracks = [];
   String? folder;
   String? androidFolderName;
   int current = -1, token = 0;
-  bool scanning = false, searching = false, shuffle = false;
+  bool scanning = false, searching = false, showingLibrary = false;
   double speed = 1;
-  int repeat = 0;
+  int playbackMode = 0;
   Duration position = Duration.zero, duration = Duration.zero;
   Timer? timer;
+  Timer? toastTimer;
+  OverlayEntry? toastEntry;
   Future<Uri?>? _artworkUri;
   int sleepMinutes = 0;
   String get title => current < 0 ? '让喜欢的音乐，留在身边' : tracks[current].name;
@@ -109,7 +112,8 @@ class _PlayerPageState extends State<PlayerPage> {
       player.playerStateStream.listen((v) {
         if (!mounted) return;
         setState(() {});
-        if (v.processingState == ProcessingState.completed && repeat != 2) {
+        if (v.processingState == ProcessingState.completed &&
+            playbackMode != 1) {
           next();
         }
       }),
@@ -151,20 +155,55 @@ class _PlayerPageState extends State<PlayerPage> {
     setState(
       () => favorites = (prefs.getStringList('favorites') ?? []).toSet(),
     );
-    final saved = prefs.getString('folder');
-    for (final value in prefs.getStringList('bilibiliTracks') ?? <String>[]) {
+    final restoredLibrary = <LocalTrack>[];
+    for (final value in prefs.getStringList('libraryTracks') ?? <String>[]) {
       try {
         final item = jsonDecode(value) as Map;
         final path = item['path'] as String;
         if (await File(path).exists()) {
-          downloadedTracks.add(LocalTrack(path, item['name'] as String));
+          restoredLibrary.add(
+            LocalTrack(
+              path,
+              item['name'] as String,
+              source: item['source'] as String?,
+            ),
+          );
         }
       } catch (_) {
         /* Ignore invalid saved entries. */
       }
     }
+    // Migrate B站 songs saved by versions before the internal library existed.
+    if (restoredLibrary.isEmpty) {
+      for (final value in prefs.getStringList('bilibiliTracks') ?? <String>[]) {
+        try {
+          final item = jsonDecode(value) as Map;
+          final path = item['path'] as String;
+          if (await File(path).exists()) {
+            restoredLibrary.add(
+              LocalTrack(path, item['name'] as String, source: path),
+            );
+          }
+        } catch (_) {
+          /* Ignore invalid legacy entries. */
+        }
+      }
+    }
     if (!mounted) return;
-    setState(() => tracks = [...downloadedTracks]);
+    if (restoredLibrary.isNotEmpty) {
+      final playlistPaths = prefs.getStringList('playlistTracks')?.toSet();
+      setState(() {
+        library = restoredLibrary;
+        tracks = playlistPaths == null
+            ? [...restoredLibrary]
+            : restoredLibrary
+                  .where((track) => playlistPaths.contains(track.path))
+                  .toList();
+      });
+      await _saveCollections();
+      return;
+    }
+    final saved = prefs.getString('folder');
     if (Platform.isAndroid) {
       final uri = prefs.getString('androidFolderUri');
       if (uri != null && mounted) {
@@ -181,6 +220,199 @@ class _PlayerPageState extends State<PlayerPage> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
     }
+  }
+
+  Future<void> _saveCollections() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      'libraryTracks',
+      library
+          .map(
+            (track) => jsonEncode({
+              'path': track.path,
+              'name': track.name,
+              'source': track.source,
+            }),
+          )
+          .toList(),
+    );
+    await prefs.setStringList(
+      'playlistTracks',
+      tracks.map((track) => track.path).toList(),
+    );
+  }
+
+  Future<List<LocalTrack>> _copyToInternalLibrary(
+    List<LocalTrack> selected,
+  ) async {
+    final result = <LocalTrack>[];
+    final pending = <LocalTrack>[];
+    for (final track in selected) {
+      final source = track.source ?? track.path;
+      final existing = library
+          .where((item) => item.source == source)
+          .firstOrNull;
+      if (existing != null) {
+        result.add(existing);
+      } else {
+        pending.add(track);
+      }
+    }
+    if (pending.isEmpty) return result;
+    if (Platform.isAndroid &&
+        pending.any((track) => track.path.startsWith('content://'))) {
+      final copied = await folders.invokeListMethod<dynamic>('copyTracks', {
+        'tracks': pending
+            .map((track) => {'uri': track.path, 'name': track.name})
+            .toList(),
+      });
+      for (final value in copied ?? const []) {
+        final item = Map<String, dynamic>.from(value as Map);
+        result.add(
+          LocalTrack(
+            item['path'] as String,
+            item['name'] as String,
+            source: item['source'] as String,
+          ),
+        );
+      }
+      return result;
+    }
+    final support = await getApplicationSupportDirectory();
+    final directory = Directory('${support.path}/music_library');
+    await directory.create(recursive: true);
+    for (final track in pending) {
+      final source = track.source ?? track.path;
+      if (track.path.startsWith(support.path)) {
+        result.add(LocalTrack(track.path, track.name, source: source));
+        continue;
+      }
+      final stem = p
+          .basenameWithoutExtension(track.name)
+          .replaceAll(RegExp(r'[^\w\u4e00-\u9fff-]+'), '_');
+      final suffix = source.hashCode.toUnsigned(32).toRadixString(16);
+      final destination = File('${directory.path}/${stem}_$suffix.mp3');
+      if (!await destination.exists()) {
+        await File(track.path).copy(destination.path);
+      }
+      result.add(LocalTrack(destination.path, track.name, source: source));
+    }
+    return result;
+  }
+
+  Future<void> _addToLibraryAndPlaylist(List<LocalTrack> selected) async {
+    final imported = await _copyToInternalLibrary(selected);
+    if (!mounted) return;
+    setState(() {
+      for (final track in imported) {
+        if (!library.any((item) => item.path == track.path)) library.add(track);
+        if (!tracks.any((item) => item.path == track.path)) tracks.add(track);
+      }
+    });
+    await _saveCollections();
+  }
+
+  void changePlaybackMode() {
+    setState(() => playbackMode = (playbackMode + 1) % 3);
+    player.setLoopMode(playbackMode == 1 ? LoopMode.one : LoopMode.off);
+    showToast(['全部循环', '单曲循环', '乱序播放'][playbackMode]);
+  }
+
+  void showToast(String text) {
+    toastTimer?.cancel();
+    toastEntry?.remove();
+    toastEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: 24,
+        right: 24,
+        bottom: MediaQuery.paddingOf(context).bottom + 72,
+        child: IgnorePointer(
+          child: Center(
+            child: Material(
+              color: const Color(0xee35332c),
+              borderRadius: BorderRadius.circular(22),
+              elevation: 8,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 10,
+                ),
+                child: Text(text, style: const TextStyle(color: Colors.white)),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    Overlay.of(context).insert(toastEntry!);
+    toastTimer = Timer(const Duration(milliseconds: 1600), () {
+      toastEntry?.remove();
+      toastEntry = null;
+    });
+  }
+
+  void openCollectionSheet({bool searchImmediately = false}) {
+    if (searchImmediately) searching = true;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => StatefulBuilder(
+        builder: (context, updateSheet) => ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(context).height * .5,
+          ),
+          child: SizedBox(
+            width: double.infinity,
+            child: Material(
+              color: const Color(0xff181713),
+              borderRadius: const BorderRadius.vertical(
+                top: Radius.circular(28),
+              ),
+              clipBehavior: Clip.antiAlias,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 8, 4),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 42,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: const Color(0xff5a574d),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: '关闭播放列表',
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(Icons.close_rounded),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Flexible(
+                    fit: FlexFit.loose,
+                    child: SingleChildScrollView(
+                      padding: EdgeInsets.fromLTRB(
+                        14,
+                        0,
+                        14,
+                        20 + MediaQuery.viewPaddingOf(context).bottom,
+                      ),
+                      child: playlist(sheetSetState: updateSheet),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> importFolder() async {
@@ -287,31 +519,9 @@ class _PlayerPageState extends State<PlayerPage> {
                                 final track = LocalTrack(
                                   path,
                                   '${selected.title}.mp3',
+                                  source: path,
                                 );
-                                downloadedTracks.removeWhere(
-                                  (t) => t.path == path,
-                                );
-                                downloadedTracks.add(track);
-                                final prefs =
-                                    await SharedPreferences.getInstance();
-                                await prefs.setStringList(
-                                  'bilibiliTracks',
-                                  downloadedTracks
-                                      .map(
-                                        (t) => jsonEncode({
-                                          'path': t.path,
-                                          'name': t.name,
-                                        }),
-                                      )
-                                      .toList(),
-                                );
-                                if (mounted) {
-                                  setState(() {
-                                    if (!tracks.any((t) => t.path == path)) {
-                                      tracks.add(track);
-                                    }
-                                  });
-                                }
+                                await _addToLibraryAndPlaylist([track]);
                                 update(() => status = '已导入曲库，可离线播放');
                               }
                             } catch (e, stackTrace) {
@@ -368,12 +578,9 @@ class _PlayerPageState extends State<PlayerPage> {
       await player.stop();
       if (!mounted) return;
       setState(() {
-        tracks = [...selected, ...downloadedTracks];
         folder = path;
-        current = -1;
-        position = Duration.zero;
-        duration = Duration.zero;
       });
+      await _addToLibraryAndPlaylist(selected);
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('folder', path);
       await prefs.setStringList(
@@ -407,13 +614,10 @@ class _PlayerPageState extends State<PlayerPage> {
       await player.stop();
       if (!mounted) return;
       setState(() {
-        tracks = [...selected, ...downloadedTracks];
         folder = result['uri'] as String;
         androidFolderName = result['name'] as String;
-        current = -1;
-        position = Duration.zero;
-        duration = Duration.zero;
       });
+      await _addToLibraryAndPlaylist(selected);
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('androidFolderUri', result['uri'] as String);
       await prefs.setStringList(
@@ -499,16 +703,12 @@ class _PlayerPageState extends State<PlayerPage> {
 
   void next({bool previous = false}) {
     if (tracks.isEmpty) return;
-    if (shuffle && tracks.length > 1) {
+    if (playbackMode == 2 && tracks.length > 1) {
       var index = Random().nextInt(tracks.length - 1);
       if (index >= current) index++;
       playTrack(index);
     } else {
       final target = current + (previous ? -1 : 1);
-      if (target >= tracks.length && repeat == 0) {
-        player.pause();
-        return;
-      }
       playTrack((target + tracks.length) % tracks.length);
     }
   }
@@ -660,10 +860,14 @@ class _PlayerPageState extends State<PlayerPage> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       icon(
-                        Icons.shuffle,
-                        () => setState(() => shuffle = !shuffle),
-                        active: shuffle,
-                        tip: '随机播放',
+                        switch (playbackMode) {
+                          1 => Icons.repeat_one,
+                          2 => Icons.shuffle,
+                          _ => Icons.repeat,
+                        },
+                        changePlaybackMode,
+                        active: true,
+                        tip: ['全部循环', '单曲循环', '乱序播放'][playbackMode],
                       ),
                       icon(
                         Icons.skip_previous_rounded,
@@ -708,15 +912,9 @@ class _PlayerPageState extends State<PlayerPage> {
                         tip: '下一首',
                       ),
                       icon(
-                        repeat == 2 ? Icons.repeat_one : Icons.repeat,
-                        () {
-                          setState(() => repeat = (repeat + 1) % 3);
-                          player.setLoopMode(
-                            repeat == 2 ? LoopMode.one : LoopMode.off,
-                          );
-                        },
-                        active: repeat > 0,
-                        tip: ['顺序播放', '列表循环', '单曲循环'][repeat],
+                        Icons.queue_music,
+                        openCollectionSheet,
+                        tip: '打开播放列表',
                       ),
                     ],
                   ),
@@ -739,11 +937,7 @@ class _PlayerPageState extends State<PlayerPage> {
                         sleep,
                       ),
                       const SizedBox(width: 8),
-                      tool(
-                        Icons.queue_music,
-                        '列表',
-                        () => setState(() => searching = !searching),
-                      ),
+                      tool(Icons.queue_music, '列表', openCollectionSheet),
                       const SizedBox(width: 8),
                       tool(
                         Icons.folder_open,
@@ -788,7 +982,7 @@ class _PlayerPageState extends State<PlayerPage> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                '${tracks.length} 首 · 本地文件夹',
+                                '${library.length} 首 · 内部曲库',
                                 style: const TextStyle(
                                   fontSize: 16,
                                   fontWeight: FontWeight.w600,
@@ -799,7 +993,7 @@ class _PlayerPageState extends State<PlayerPage> {
                         ),
                         icon(
                           Icons.search,
-                          () => setState(() => searching = !searching),
+                          () => openCollectionSheet(searchImmediately: true),
                           tip: '搜索歌曲',
                         ),
                         PopupMenuButton<String>(
@@ -828,20 +1022,10 @@ class _PlayerPageState extends State<PlayerPage> {
                       ],
                     ),
                     const SizedBox(height: 24),
-                    if (wide)
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(child: panel),
-                          const SizedBox(width: 32),
-                          Expanded(child: playlist()),
-                        ],
-                      )
-                    else ...[
-                      panel,
-                      const SizedBox(height: 24),
-                      playlist(),
-                    ],
+                    Align(
+                      alignment: Alignment.topCenter,
+                      child: SizedBox(width: wide ? 520 : null, child: panel),
+                    ),
                     const SizedBox(height: 22),
                     const Text(
                       '爱悦 MUSIC / 为每一段独处配乐',
@@ -989,11 +1173,109 @@ class _PlayerPageState extends State<PlayerPage> {
       ),
     ),
   );
-  Widget playlist() {
-    final indices = List.generate(tracks.length, (i) => i)
+
+  Future<void> _removeFromPlaylist(LocalTrack track) async {
+    final playingPath = current >= 0 && current < tracks.length
+        ? tracks[current].path
+        : null;
+    if (playingPath == track.path) {
+      token++;
+      await player.stop();
+    }
+    if (!mounted) return;
+    setState(() {
+      tracks.removeWhere((item) => item.path == track.path);
+      current = playingPath == track.path
+          ? -1
+          : tracks.indexWhere((item) => item.path == playingPath);
+      if (current < 0) {
+        position = Duration.zero;
+        duration = Duration.zero;
+      }
+    });
+    await _saveCollections();
+    message('已从播放列表移除，内部文件仍保留');
+  }
+
+  Future<void> _pinTrack(LocalTrack track) async {
+    final playingPath = current >= 0 && current < tracks.length
+        ? tracks[current].path
+        : null;
+    setState(() {
+      tracks.removeWhere((item) => item.path == track.path);
+      tracks.insert(0, track);
+      current = tracks.indexWhere((item) => item.path == playingPath);
+    });
+    await _saveCollections();
+    message('已置顶');
+  }
+
+  Future<void> _addToPlaylist(LocalTrack track) async {
+    if (tracks.any((item) => item.path == track.path)) {
+      message('歌曲已在播放列表中');
+      return;
+    }
+    setState(() => tracks.add(track));
+    await _saveCollections();
+    message('已添加到播放列表');
+  }
+
+  Future<void> _deleteFromLibrary(LocalTrack track) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('从内部曲库删除？'),
+        content: Text('“${track.name}”将从播放列表和 App 内部存储中永久删除。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('永久删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final playingPath = current >= 0 && current < tracks.length
+        ? tracks[current].path
+        : null;
+    if (playingPath == track.path) {
+      token++;
+      await player.stop();
+    }
+    try {
+      final file = File(track.path);
+      if (await file.exists()) await file.delete();
+    } catch (error) {
+      message('文件删除失败：$error');
+      return;
+    }
+    if (!mounted) return;
+    setState(() {
+      library.removeWhere((item) => item.path == track.path);
+      tracks.removeWhere((item) => item.path == track.path);
+      favorites.remove(track.path);
+      current = tracks.indexWhere((item) => item.path == playingPath);
+      if (current < 0) {
+        position = Duration.zero;
+        duration = Duration.zero;
+      }
+    });
+    await _saveCollections();
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('favorites', favorites.toList());
+    message('已从内部曲库和存储空间删除');
+  }
+
+  Widget playlist({StateSetter? sheetSetState}) {
+    final items = showingLibrary ? library : tracks;
+    final indices = List.generate(items.length, (i) => i)
         .where(
           (i) =>
-              tracks[i].name.toLowerCase().contains(search.text.toLowerCase()),
+              items[i].name.toLowerCase().contains(search.text.toLowerCase()),
         )
         .toList();
     return Container(
@@ -1009,18 +1291,24 @@ class _PlayerPageState extends State<PlayerPage> {
             padding: const EdgeInsets.all(17),
             child: Row(
               children: [
-                const Icon(Icons.folder_outlined, size: 21, color: muted),
+                Icon(
+                  showingLibrary ? Icons.library_music : Icons.queue_music,
+                  size: 21,
+                  color: muted,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    androidFolderName ??
-                        (folder == null ? '你的音乐资料库' : p.basename(folder!)),
-                    overflow: TextOverflow.ellipsis,
+                  child: SegmentedButton<bool>(
+                    segments: const [
+                      ButtonSegment(value: false, label: Text('播放列表')),
+                      ButtonSegment(value: true, label: Text('内部曲库')),
+                    ],
+                    selected: {showingLibrary},
+                    onSelectionChanged: (value) {
+                      setState(() => showingLibrary = value.first);
+                      sheetSetState?.call(() {});
+                    },
                   ),
-                ),
-                const Text(
-                  '下一首自动连播',
-                  style: TextStyle(color: muted, fontSize: 11),
                 ),
               ],
             ),
@@ -1030,7 +1318,10 @@ class _PlayerPageState extends State<PlayerPage> {
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
               child: TextField(
                 controller: search,
-                onChanged: (_) => setState(() {}),
+                onChanged: (_) {
+                  setState(() {});
+                  sheetSetState?.call(() {});
+                },
                 decoration: const InputDecoration(
                   hintText: '搜索文件名…',
                   prefixIcon: Icon(Icons.search),
@@ -1043,7 +1334,7 @@ class _PlayerPageState extends State<PlayerPage> {
               padding: EdgeInsets.all(36),
               child: CircularProgressIndicator(),
             )
-          else if (tracks.isEmpty)
+          else if (items.isEmpty)
             Padding(
               padding: const EdgeInsets.all(28),
               child: Column(
@@ -1084,7 +1375,13 @@ class _PlayerPageState extends State<PlayerPage> {
                 padding: EdgeInsets.zero,
                 itemCount: indices.length,
                 itemBuilder: (context, row) {
-                  final index = indices[row], selected = current == index;
+                  final index = indices[row];
+                  final track = items[index];
+                  final playlistIndex = tracks.indexWhere(
+                    (item) => item.path == track.path,
+                  );
+                  final selected =
+                      playlistIndex >= 0 && current == playlistIndex;
                   return Container(
                     decoration: BoxDecoration(
                       color: selected ? const Color(0xff2b2c1c) : null,
@@ -1102,7 +1399,7 @@ class _PlayerPageState extends State<PlayerPage> {
                         style: TextStyle(color: selected ? lime : muted),
                       ),
                       title: Text(
-                        tracks[index].name,
+                        track.name,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -1116,10 +1413,55 @@ class _PlayerPageState extends State<PlayerPage> {
                             : 'MP3 · 本地文件',
                         style: const TextStyle(color: muted, fontSize: 12),
                       ),
-                      trailing: selected
-                          ? const Icon(Icons.graphic_eq, color: lime)
-                          : const Icon(Icons.play_arrow_rounded, color: muted),
-                      onTap: () => playTrack(index),
+                      trailing: PopupMenuButton<String>(
+                        icon: Icon(
+                          selected ? Icons.graphic_eq : Icons.more_vert,
+                          color: selected ? lime : muted,
+                        ),
+                        onSelected: (value) async {
+                          if (value == 'pin') await _pinTrack(track);
+                          if (value == 'remove') {
+                            await _removeFromPlaylist(track);
+                          }
+                          if (value == 'add') await _addToPlaylist(track);
+                          if (value == 'delete') {
+                            await _deleteFromLibrary(track);
+                          }
+                          sheetSetState?.call(() {});
+                        },
+                        itemBuilder: (_) => showingLibrary
+                            ? [
+                                if (playlistIndex < 0)
+                                  const PopupMenuItem(
+                                    value: 'add',
+                                    child: Text('添加到播放列表'),
+                                  ),
+                                const PopupMenuItem(
+                                  value: 'delete',
+                                  child: Text('从内部曲库永久删除'),
+                                ),
+                              ]
+                            : const [
+                                PopupMenuItem(value: 'pin', child: Text('置顶')),
+                                PopupMenuItem(
+                                  value: 'remove',
+                                  child: Text('从播放列表移除'),
+                                ),
+                              ],
+                      ),
+                      onTap: () async {
+                        if (playlistIndex >= 0) {
+                          playTrack(playlistIndex);
+                        } else {
+                          await _addToPlaylist(track);
+                          playTrack(
+                            tracks.indexWhere(
+                              (item) => item.path == track.path,
+                            ),
+                          );
+                        }
+                        sheetSetState?.call(() {});
+                      },
                     ),
                   );
                 },
@@ -1132,9 +1474,9 @@ class _PlayerPageState extends State<PlayerPage> {
             child: Text(
               scanning
                   ? '正在扫描本地文件夹…'
-                  : folder == null
-                  ? '♫ 音乐仅在本机播放，文件不会上传'
-                  : '♫ 已发现 ${tracks.length} 首 MP3 · 点击歌曲播放',
+                  : showingLibrary
+                  ? '♫ 内部曲库 ${library.length} 首 · 删除会同时删除内部文件'
+                  : '♫ 播放列表 ${tracks.length} 首 · 移除不会删除内部文件',
               textAlign: TextAlign.center,
               style: const TextStyle(color: muted, fontSize: 12),
             ),
@@ -1147,6 +1489,8 @@ class _PlayerPageState extends State<PlayerPage> {
   @override
   void dispose() {
     timer?.cancel();
+    toastTimer?.cancel();
+    toastEntry?.remove();
     for (final s in subs) {
       s.cancel();
     }

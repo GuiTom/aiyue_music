@@ -55,9 +55,39 @@ class MainActivity : AudioServiceActivity() {
                         if (value == null) result.error("INVALID_URI", "缺少文件夹 URI", null)
                         else scan(Uri.parse(value), result)
                     }
+                    "copyTracks" -> {
+                        val tracks = call.argument<List<Map<String, String>>>("tracks")
+                        if (tracks == null) result.error("INVALID_TRACKS", "缺少歌曲列表", null)
+                        else copyTracks(tracks, result)
+                    }
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun copyTracks(tracks: List<Map<String, String>>, result: MethodChannel.Result) {
+        worker.execute {
+            try {
+                val directory = java.io.File(filesDir, "music_library").apply { mkdirs() }
+                val copied = tracks.map { track ->
+                    val source = track["uri"] ?: error("缺少歌曲 URI")
+                    val displayName = track["name"] ?: "music.mp3"
+                    val stem = displayName.substringBeforeLast('.').replace(Regex("[^A-Za-z0-9\\u4e00-\\u9fff_-]+"), "_")
+                    val fileName = "${stem}_${Integer.toHexString(source.hashCode())}.mp3"
+                    val target = java.io.File(directory, fileName)
+                    if (!target.exists() || target.length() == 0L) {
+                        contentResolver.openInputStream(Uri.parse(source)).use { input ->
+                            requireNotNull(input) { "无法读取 $displayName" }
+                            target.outputStream().use { output -> input.copyTo(output) }
+                        }
+                    }
+                    mapOf("path" to target.absolutePath, "name" to displayName, "source" to source)
+                }
+                runOnUiThread { result.success(copied) }
+            } catch (e: Exception) {
+                runOnUiThread { result.error("COPY_FAILED", "复制到内部曲库失败：${e.message}", null) }
+            }
+        }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

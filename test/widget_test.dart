@@ -44,7 +44,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(imported!.map((t) => t.name), ['a.mp3', 'b.mp3']);
   });
-  testWidgets('Empty library and search work on a narrow screen', (
+  testWidgets('Library opens as a bottom sheet and mode uses a toast', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -54,11 +54,20 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(const MusicApp());
     await tester.pump();
-    expect(find.text('0 首 · 本地文件夹'), findsOneWidget);
-    expect(find.text('导入音乐文件夹'), findsOneWidget);
-    await tester.tap(find.byTooltip('搜索歌曲'));
+    expect(find.text('0 首 · 内部曲库'), findsOneWidget);
+    expect(find.text('播放列表'), findsNothing);
+    await tester.tap(find.byTooltip('全部循环'));
     await tester.pump();
-    expect(find.byType(TextField), findsOneWidget);
+    expect(find.text('单曲循环'), findsOneWidget);
+    expect(find.byType(SnackBar), findsNothing);
+    await tester.tap(find.byTooltip('打开播放列表'));
+    await tester.pumpAndSettle();
+    expect(find.text('播放列表'), findsOneWidget);
+    expect(find.text('导入音乐文件夹'), findsOneWidget);
+    expect(find.byTooltip('关闭播放列表'), findsOneWidget);
+    await tester.tap(find.byTooltip('关闭播放列表'));
+    await tester.pumpAndSettle();
+    expect(find.text('播放列表'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

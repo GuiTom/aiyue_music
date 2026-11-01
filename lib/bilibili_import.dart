@@ -157,7 +157,7 @@ class BilibiliImporter {
       'Download started bvid=${video.bvid} cid=${video.cid} title=${video.title}',
     );
     final directory = Directory(
-      '${(await getApplicationSupportDirectory()).path}/bilibili',
+      '${(await getApplicationSupportDirectory()).path}/music_library',
     );
     await directory.create(recursive: true);
     final output = File('${directory.path}/${video.bvid}_${video.cid}.mp3');
