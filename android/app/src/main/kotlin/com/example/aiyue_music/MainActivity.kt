@@ -39,11 +39,10 @@ class MainActivity : AudioServiceActivity() {
                         } else {
                             pending = result
                             try {
-                                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or
-                                        Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
-                                }, 7021)
+                                startActivityForResult(
+                                    Intent(this, FolderPickerActivity::class.java),
+                                    7021
+                                )
                             } catch (e: Exception) {
                                 pending = null
                                 result.error("PICK_FAILED", e.message, null)
