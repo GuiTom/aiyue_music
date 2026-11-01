@@ -47,6 +47,16 @@ macOS 已配置用户选择文件的只读权限。沙盒权限在重启后可�
 
 ## 验证
 
+### Android 包体积
+
+Android 仅使用 FFmpeg 音频发行版（保留 `libmp3lame`），不再打包 full-gpl 视频滤镜能力；Android 未使用的 MPV 库也已移除。日常 `flutter run` 生成的是包含调试内核和多个 CPU 架构的 Debug 包，体积不能代表发布包。发布时使用：
+
+```sh
+flutter build apk --release --split-per-abi
+```
+
+现代 Android 手机通常安装 `app-arm64-v8a-release.apk`。不要把未分架构的 `app-debug.apk` 作为正式安装包分发。
+
 Android 构建已在项目 Gradle Wrapper 中关闭 configuration cache，以兼容 Flutter 3.35 的 `DebugMinSdkCheck`；即使全局 `~/.gradle/gradle.properties` 开启此缓存也不会影响本项目。普通构建缓存保持原设置。依赖的“newer versions incompatible”提示不是编译错误，无需为此强制升级依赖。
 
 ```sh

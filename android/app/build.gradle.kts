@@ -5,6 +5,16 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// The Flutter plugin defaults to FFmpeg full-gpl. This app only converts
+// audio to MP3, so use the substantially smaller audio package instead.
+configurations.configureEach {
+    exclude(group = "com.antonkarpenko", module = "ffmpeg-kit-full-gpl")
+}
+
+dependencies {
+    implementation("com.antonkarpenko:ffmpeg-kit-audio:2.2.3")
+}
+
 android {
     namespace = "com.example.aiyue_music"
     compileSdk = flutter.compileSdkVersion

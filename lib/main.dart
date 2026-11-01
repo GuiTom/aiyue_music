@@ -29,6 +29,7 @@ class LocalTrack {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   JustAudioMediaKit.ensureInitialized(linux: true, windows: true);
   if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
     playbackService = await AudioService.init(
@@ -360,7 +361,7 @@ class _PlayerPageState extends State<PlayerPage> {
       builder: (context) => StatefulBuilder(
         builder: (context, updateSheet) => ConstrainedBox(
           constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(context).height * .5,
+            maxHeight: MediaQuery.sizeOf(context).height * .7,
           ),
           child: SizedBox(
             width: double.infinity,
@@ -1369,103 +1370,99 @@ class _PlayerPageState extends State<PlayerPage> {
           else if (indices.isEmpty)
             const Padding(padding: EdgeInsets.all(30), child: Text('没有找到匹配的歌曲'))
           else
-            SizedBox(
-              height: min(indices.length * 78.0, 480),
-              child: ListView.builder(
-                padding: EdgeInsets.zero,
-                itemCount: indices.length,
-                itemBuilder: (context, row) {
-                  final index = indices[row];
-                  final track = items[index];
-                  final playlistIndex = tracks.indexWhere(
-                    (item) => item.path == track.path,
-                  );
-                  final selected =
-                      playlistIndex >= 0 && current == playlistIndex;
-                  return Container(
-                    decoration: BoxDecoration(
-                      color: selected ? const Color(0xff2b2c1c) : null,
-                      border: const Border(
-                        top: BorderSide(color: Color(0xff333026)),
+            ListView.builder(
+              padding: EdgeInsets.zero,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: indices.length,
+              itemBuilder: (context, row) {
+                final index = indices[row];
+                final track = items[index];
+                final playlistIndex = tracks.indexWhere(
+                  (item) => item.path == track.path,
+                );
+                final selected = playlistIndex >= 0 && current == playlistIndex;
+                return Container(
+                  decoration: BoxDecoration(
+                    color: selected ? const Color(0xff2b2c1c) : null,
+                    border: const Border(
+                      top: BorderSide(color: Color(0xff333026)),
+                    ),
+                  ),
+                  child: ListTile(
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 18,
+                      vertical: 5,
+                    ),
+                    leading: Text(
+                      '${index + 1}'.padLeft(2, '0'),
+                      style: TextStyle(color: selected ? lime : muted),
+                    ),
+                    title: Text(
+                      track.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: selected ? lime : const Color(0xffece8dc),
+                        fontSize: 15,
                       ),
                     ),
-                    child: ListTile(
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 18,
-                        vertical: 5,
+                    subtitle: Text(
+                      selected && duration > Duration.zero
+                          ? 'MP3 · ${clock(duration)}'
+                          : 'MP3 · 本地文件',
+                      style: const TextStyle(color: muted, fontSize: 12),
+                    ),
+                    trailing: PopupMenuButton<String>(
+                      icon: Icon(
+                        selected ? Icons.graphic_eq : Icons.more_vert,
+                        color: selected ? lime : muted,
                       ),
-                      leading: Text(
-                        '${index + 1}'.padLeft(2, '0'),
-                        style: TextStyle(color: selected ? lime : muted),
-                      ),
-                      title: Text(
-                        track.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: selected ? lime : const Color(0xffece8dc),
-                          fontSize: 15,
-                        ),
-                      ),
-                      subtitle: Text(
-                        selected && duration > Duration.zero
-                            ? 'MP3 · ${clock(duration)}'
-                            : 'MP3 · 本地文件',
-                        style: const TextStyle(color: muted, fontSize: 12),
-                      ),
-                      trailing: PopupMenuButton<String>(
-                        icon: Icon(
-                          selected ? Icons.graphic_eq : Icons.more_vert,
-                          color: selected ? lime : muted,
-                        ),
-                        onSelected: (value) async {
-                          if (value == 'pin') await _pinTrack(track);
-                          if (value == 'remove') {
-                            await _removeFromPlaylist(track);
-                          }
-                          if (value == 'add') await _addToPlaylist(track);
-                          if (value == 'delete') {
-                            await _deleteFromLibrary(track);
-                          }
-                          sheetSetState?.call(() {});
-                        },
-                        itemBuilder: (_) => showingLibrary
-                            ? [
-                                if (playlistIndex < 0)
-                                  const PopupMenuItem(
-                                    value: 'add',
-                                    child: Text('添加到播放列表'),
-                                  ),
-                                const PopupMenuItem(
-                                  value: 'delete',
-                                  child: Text('从内部曲库永久删除'),
-                                ),
-                              ]
-                            : const [
-                                PopupMenuItem(value: 'pin', child: Text('置顶')),
-                                PopupMenuItem(
-                                  value: 'remove',
-                                  child: Text('从播放列表移除'),
-                                ),
-                              ],
-                      ),
-                      onTap: () async {
-                        if (playlistIndex >= 0) {
-                          playTrack(playlistIndex);
-                        } else {
-                          await _addToPlaylist(track);
-                          playTrack(
-                            tracks.indexWhere(
-                              (item) => item.path == track.path,
-                            ),
-                          );
+                      onSelected: (value) async {
+                        if (value == 'pin') await _pinTrack(track);
+                        if (value == 'remove') {
+                          await _removeFromPlaylist(track);
+                        }
+                        if (value == 'add') await _addToPlaylist(track);
+                        if (value == 'delete') {
+                          await _deleteFromLibrary(track);
                         }
                         sheetSetState?.call(() {});
                       },
+                      itemBuilder: (_) => showingLibrary
+                          ? [
+                              if (playlistIndex < 0)
+                                const PopupMenuItem(
+                                  value: 'add',
+                                  child: Text('添加到播放列表'),
+                                ),
+                              const PopupMenuItem(
+                                value: 'delete',
+                                child: Text('从内部曲库永久删除'),
+                              ),
+                            ]
+                          : const [
+                              PopupMenuItem(value: 'pin', child: Text('置顶')),
+                              PopupMenuItem(
+                                value: 'remove',
+                                child: Text('从播放列表移除'),
+                              ),
+                            ],
                     ),
-                  );
-                },
-              ),
+                    onTap: () async {
+                      if (playlistIndex >= 0) {
+                        playTrack(playlistIndex);
+                      } else {
+                        await _addToPlaylist(track);
+                        playTrack(
+                          tracks.indexWhere((item) => item.path == track.path),
+                        );
+                      }
+                      sheetSetState?.call(() {});
+                    },
+                  ),
+                );
+              },
             ),
           Container(
             width: double.infinity,
