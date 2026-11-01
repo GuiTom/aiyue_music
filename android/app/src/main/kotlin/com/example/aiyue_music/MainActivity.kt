@@ -7,10 +7,14 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import java.util.concurrent.Executors
 
 class MainActivity : AudioServiceActivity() {
     private var pending: MethodChannel.Result? = null
+    private var pendingNotificationPermission: MethodChannel.Result? = null
     private val worker = Executors.newSingleThreadExecutor()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -18,6 +22,17 @@ class MainActivity : AudioServiceActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "aiyue/folders")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "requestNotificationPermission" -> {
+                        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+                            result.success(true)
+                        } else if (pendingNotificationPermission != null) {
+                            result.error("BUSY", "通知权限请求正在进行", null)
+                        } else {
+                            pendingNotificationPermission = result
+                            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7022)
+                        }
+                    }
                     "pick" -> {
                         if (pending != null) {
                             result.error("BUSY", "文件夹选择器已打开", null)
@@ -43,6 +58,14 @@ class MainActivity : AudioServiceActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != 7022) return
+        val result = pendingNotificationPermission ?: return
+        pendingNotificationPermission = null
+        result.success(grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

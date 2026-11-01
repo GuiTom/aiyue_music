@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:file_picker/file_picker.dart';
@@ -7,9 +8,11 @@ import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:audio_service/audio_service.dart';
 import 'playback_service.dart';
+import 'bilibili_import.dart';
 part 'track_import_dialog.dart';
 part 'equalizer_panel.dart';
 
@@ -34,6 +37,7 @@ Future<void> main() async {
         androidNotificationChannelName: '爱悦音乐播放',
         androidNotificationOngoing: true,
         androidStopForegroundOnPause: true,
+        androidNotificationIcon: 'mipmap/ic_launcher',
       ),
     );
     await playbackService!.configureSession();
@@ -73,6 +77,7 @@ class _PlayerPageState extends State<PlayerPage> {
   static const folders = MethodChannel('aiyue/folders');
   List<LocalTrack> tracks = [];
   Set<String> favorites = {};
+  final List<LocalTrack> downloadedTracks = [];
   String? folder;
   String? androidFolderName;
   int current = -1, token = 0;
@@ -81,6 +86,7 @@ class _PlayerPageState extends State<PlayerPage> {
   int repeat = 0;
   Duration position = Duration.zero, duration = Duration.zero;
   Timer? timer;
+  Future<Uri?>? _artworkUri;
   int sleepMinutes = 0;
   String get title => current < 0 ? '让喜欢的音乐，留在身边' : tracks[current].name;
   @override
@@ -88,6 +94,7 @@ class _PlayerPageState extends State<PlayerPage> {
     super.initState();
     playbackService?.next = () async => next();
     playbackService?.previous = () async => next(previous: true);
+    _requestNotificationPermission();
     subs.add(
       player.positionStream.listen((v) {
         if (mounted) setState(() => position = v);
@@ -110,6 +117,34 @@ class _PlayerPageState extends State<PlayerPage> {
     restore();
   }
 
+  Future<void> _requestNotificationPermission() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final granted = await folders.invokeMethod<bool>(
+        'requestNotificationPermission',
+      );
+      if (granted == false) {
+        message('请允许通知权限，以便显示锁屏播放控制');
+      }
+    } catch (_) {
+      // Older Android versions and tests do not require notification access.
+    }
+  }
+
+  Future<Uri?> _lockScreenArtwork() => _artworkUri ??= () async {
+    try {
+      final directory = await getApplicationSupportDirectory();
+      final file = File('${directory.path}/lock_screen_cover.jpg');
+      if (!await file.exists()) {
+        final data = await rootBundle.load('assets/night.jpg');
+        await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
+      }
+      return file.uri;
+    } catch (_) {
+      return null;
+    }
+  }();
+
   Future<void> restore() async {
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
@@ -117,6 +152,19 @@ class _PlayerPageState extends State<PlayerPage> {
       () => favorites = (prefs.getStringList('favorites') ?? []).toSet(),
     );
     final saved = prefs.getString('folder');
+    for (final value in prefs.getStringList('bilibiliTracks') ?? <String>[]) {
+      try {
+        final item = jsonDecode(value) as Map;
+        final path = item['path'] as String;
+        if (await File(path).exists()) {
+          downloadedTracks.add(LocalTrack(path, item['name'] as String));
+        }
+      } catch (_) {
+        /* Ignore invalid saved entries. */
+      }
+    }
+    if (!mounted) return;
+    setState(() => tracks = [...downloadedTracks]);
     if (Platform.isAndroid) {
       final uri = prefs.getString('androidFolderUri');
       if (uri != null && mounted) {
@@ -150,6 +198,150 @@ class _PlayerPageState extends State<PlayerPage> {
     }
   }
 
+  Future<void> importBilibili() async {
+    final input = TextEditingController();
+    final importer = BilibiliImporter();
+    BilibiliImporter.log('Import dialog opened');
+    BilibiliVideo? video;
+    var busy = false;
+    var status = '';
+    try {
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (context, update) {
+            return PopScope(
+              canPop: !busy,
+              child: AlertDialog(
+                title: const Text('从 B站导入 MP3'),
+                content: SizedBox(
+                  width: 420,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: input,
+                        enabled: !busy,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          hintText: '粘贴 b23.tv 链接或完整分享文字',
+                        ),
+                        onChanged: (_) => update(() {
+                          video = null;
+                          status = '';
+                        }),
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        '仅导入你有权下载的音频。多分P链接导入指定P，默认第1P。',
+                        style: TextStyle(color: muted, fontSize: 12),
+                      ),
+                      if (video != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Text(video!.title),
+                        ),
+                      if (status.isNotEmpty)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 12),
+                          child: Text(status),
+                        ),
+                      if (busy)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 12),
+                          child: LinearProgressIndicator(),
+                        ),
+                    ],
+                  ),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: busy ? null : () => Navigator.pop(dialogContext),
+                    child: const Text('关闭'),
+                  ),
+                  FilledButton(
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            update(() {
+                              busy = true;
+                              status = video == null ? '正在解析链接…' : '正在获取音轨…';
+                            });
+                            try {
+                              if (video == null) {
+                                final resolved = await importer.resolve(
+                                  input.text.trim(),
+                                );
+                                update(() {
+                                  video = resolved;
+                                  status = '请确认视频后导入';
+                                });
+                              } else {
+                                final selected = video!;
+                                final path = await importer.download(
+                                  selected,
+                                  (text) => update(() => status = text),
+                                );
+                                final track = LocalTrack(
+                                  path,
+                                  '${selected.title}.mp3',
+                                );
+                                downloadedTracks.removeWhere(
+                                  (t) => t.path == path,
+                                );
+                                downloadedTracks.add(track);
+                                final prefs =
+                                    await SharedPreferences.getInstance();
+                                await prefs.setStringList(
+                                  'bilibiliTracks',
+                                  downloadedTracks
+                                      .map(
+                                        (t) => jsonEncode({
+                                          'path': t.path,
+                                          'name': t.name,
+                                        }),
+                                      )
+                                      .toList(),
+                                );
+                                if (mounted) {
+                                  setState(() {
+                                    if (!tracks.any((t) => t.path == path)) {
+                                      tracks.add(track);
+                                    }
+                                  });
+                                }
+                                update(() => status = '已导入曲库，可离线播放');
+                              }
+                            } catch (e, stackTrace) {
+                              BilibiliImporter.log(
+                                'UI import action failed',
+                                error: e,
+                                stackTrace: stackTrace,
+                              );
+                              update(
+                                () => status =
+                                    '导入失败：${e is FormatException ? e.message : e}',
+                              );
+                            } finally {
+                              update(() => busy = false);
+                            }
+                          },
+                    child: Text(video == null ? '解析链接' : '下载并导入'),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      );
+    } finally {
+      importer.close();
+      input.dispose();
+    }
+  }
+
   Future<void> scan(String path, {bool restoring = false}) async {
     if (Platform.isAndroid) {
       await androidFolder(uri: path, restoring: restoring);
@@ -176,7 +368,7 @@ class _PlayerPageState extends State<PlayerPage> {
       await player.stop();
       if (!mounted) return;
       setState(() {
-        tracks = selected;
+        tracks = [...selected, ...downloadedTracks];
         folder = path;
         current = -1;
         position = Duration.zero;
@@ -215,7 +407,7 @@ class _PlayerPageState extends State<PlayerPage> {
       await player.stop();
       if (!mounted) return;
       setState(() {
-        tracks = selected;
+        tracks = [...selected, ...downloadedTracks];
         folder = result['uri'] as String;
         androidFolderName = result['name'] as String;
         current = -1;
@@ -268,6 +460,8 @@ class _PlayerPageState extends State<PlayerPage> {
       position = Duration.zero;
       duration = Duration.zero;
     });
+    final artwork = await _lockScreenArtwork();
+    if (!mounted || request != token) return;
     playbackService?.mediaItem.add(
       MediaItem(
         id: tracks[index].path,
@@ -276,6 +470,7 @@ class _PlayerPageState extends State<PlayerPage> {
             androidFolderName ??
             (folder == null ? '本地音乐' : p.basename(folder!)),
         artist: '爱悦 · 本地音乐',
+        artUri: artwork,
       ),
     );
     try {
@@ -611,9 +806,14 @@ class _PlayerPageState extends State<PlayerPage> {
                           icon: const Icon(Icons.more_horiz),
                           onSelected: (v) {
                             if (v == 'import') importFolder();
+                            if (v == 'bilibili') importBilibili();
                             if (v == 'scan' && folder != null) scan(folder!);
                           },
                           itemBuilder: (_) => [
+                            const PopupMenuItem(
+                              value: 'bilibili',
+                              child: Text('从 B站导入 MP3'),
+                            ),
                             const PopupMenuItem(
                               value: 'import',
                               child: Text('导入文件夹'),
@@ -866,6 +1066,11 @@ class _PlayerPageState extends State<PlayerPage> {
                     onPressed: importFolder,
                     icon: const Icon(Icons.create_new_folder_outlined),
                     label: const Text('导入音乐文件夹'),
+                  ),
+                  TextButton.icon(
+                    onPressed: importBilibili,
+                    icon: const Icon(Icons.link),
+                    label: const Text('从 B站分享链接导入'),
                   ),
                 ],
               ),
